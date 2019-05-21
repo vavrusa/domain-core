@@ -20,7 +20,7 @@ extern crate chrono;
 extern crate failure;
 #[macro_use] extern crate failure_derive;
 extern crate rand;
-#[cfg(feature = "tsig")]
+#[cfg(any(feature = "tsig", feature = "dnssec"))]
 extern crate ring;
 extern crate void;
 

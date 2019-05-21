@@ -15,8 +15,9 @@ name = "domain_core"
 path = "src/lib.rs"
 
 [features]
+dnssec = ["ring"]
 tsig = ["ring"]
-default = ["tsig"]
+default = ["tsig", "dnssec"]
 
 [dependencies]
 bytes          = "^0.4"
@@ -29,3 +30,6 @@ void           = "^1.0"
 [dependencies.ring]
 version = "^0.14"
 optional = true
+
+[dev-dependencies]
+base64         = "^0.10"

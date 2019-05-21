@@ -16,6 +16,19 @@ use ::iana::{DigestAlg, Rtype, SecAlg};
 use ::master::scan::{CharSource, ScanError, Scan, Scanner};
 use ::utils::base64;
 
+#[cfg(feature = "dnssec")]
+use ::bits::name::ToDname;
+#[cfg(feature = "dnssec")]
+use ring::digest;
+
+//------------ AlgorithmError ------------------------------------------------
+
+#[derive(Clone, Debug, Fail)]
+pub enum AlgorithmError {
+    #[fail(display="unsupported algorithm")]
+    Unsupported,
+}
+
 
 //------------ Dnskey --------------------------------------------------------
 
@@ -56,6 +69,67 @@ impl Dnskey {
 
     pub fn public_key(&self) -> &Bytes {
         &self.public_key
+    }
+
+    /// Returns true if the key has been revoked.
+    /// See [RFC 5011, Section 3](https://tools.ietf.org/html/rfc5011#section-3).
+    pub fn is_revoked(&self) -> bool {
+        self.flags() & 0b0000_0000_1000_0000 != 0
+    }
+
+    /// Returns true if the key has SEP (Secure Entry Point) bit set.
+    /// See [RFC 4034, Section 2.1.1](https://tools.ietf.org/html/rfc4034#section-2.1.1)
+    ///
+    /// ```
+    /// 2.1.1.  The Flags Field
+    ///
+    ///    This flag is only intended to be a hint to zone signing or debugging software as to the
+    ///    intended use of this DNSKEY record; validators MUST NOT alter their
+    ///    behavior during the signature validation process in any way based on
+    ///    the setting of this bit.
+    /// ```
+    pub fn is_secure_entry_point(&self) -> bool {
+        self.flags() & 0b0000_0000_0000_0001 != 0
+    }
+
+    /// Returns true if the key is ZSK (Zone Signing Key) bit set. If the ZSK is not set, the
+    /// key MUST NOT be used to verify RRSIGs that cover RRSETs.
+    /// See [RFC 4034, Section 2.1.1](https://tools.ietf.org/html/rfc4034#section-2.1.1)
+    pub fn is_zsk(&self) -> bool {
+        self.flags() & 0b0000_0001_0000_0000 != 0
+    }
+
+    /// Calculates a digest from DNSKEY.
+    /// See [RFC 4034, Section 5.1.4](https://tools.ietf.org/html/rfc4034#section-5.1.4)
+    ///
+    /// ```
+    /// 5.1.4.  The Digest Field
+    ///   The digest is calculated by concatenating the canonical form of the
+    ///   fully qualified owner name of the DNSKEY RR with the DNSKEY RDATA,
+    ///   and then applying the digest algorithm.
+    ///
+    ///     digest = digest_algorithm( DNSKEY owner name | DNSKEY RDATA);
+    ///
+    ///      "|" denotes concatenation
+    ///
+    ///     DNSKEY RDATA = Flags | Protocol | Algorithm | Public Key.
+    /// ```
+    #[cfg(feature = "dnssec")]
+    pub fn digest<N: ToDname>(&self, dname: &N, algorithm: DigestAlg) -> Result<impl AsRef<[u8]>, AlgorithmError> {
+        let mut buf: Vec<u8> = Vec::new();
+        dname.compose(&mut buf);
+        self.compose(&mut buf);
+
+        let mut ctx = match algorithm {
+            DigestAlg::Sha1 => digest::Context::new(&digest::SHA1),
+            DigestAlg::Sha256 => digest::Context::new(&digest::SHA256),
+            DigestAlg::Gost => { return Err(AlgorithmError::Unsupported); }
+            DigestAlg::Sha384 => digest::Context::new(&digest::SHA384),
+            _ => { return Err(AlgorithmError::Unsupported); }
+        };
+
+        ctx.update(&buf);
+        Ok(ctx.finish())
     }
 }
 
@@ -874,8 +948,15 @@ fn split_rtype(rtype: Rtype) -> (u8, usize, u8) {
 
 #[cfg(test)]
 mod test {
+    extern crate base64;
     use super::*;
     use ::iana::Rtype;
+
+    // Returns current root KSK for testing.
+    fn root_pubkey() -> Dnskey {
+        let pubkey = base64::decode("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU=").unwrap().into();
+        Dnskey::new(257, 3, SecAlg::RsaSha256, pubkey)
+    }
 
     #[test]
     fn rtype_bitmap_builder() {
@@ -891,5 +972,28 @@ mod test {
                      \x00\x00\x00\x00\x00\x00\x00\x00\
                      \x00\x00\x00\x00\x00\x00\x00\x00\
                      \x00\x00\x00\x00\x20"[..]);
+    }
+
+    #[test]
+    fn dnskey_flags() {
+        let dnskey = root_pubkey();
+        assert_eq!(dnskey.is_zsk(), true);
+        assert_eq!(dnskey.is_secure_entry_point(), true);
+        assert_eq!(dnskey.is_revoked(), false);
+    }
+
+    #[test]
+    fn dnskey_digest() {
+        let dnskey = root_pubkey();
+        let owner = Dname::root();
+        let expected = Ds::new(20326, SecAlg::RsaSha256, DigestAlg::Sha256, base64::decode("4G1EuAuPHTmpXAsNfGXQhFjogECbvGg0VxBCN8f47I0=").unwrap().into());
+        assert_eq!(dnskey.digest(&owner, DigestAlg::Sha256).unwrap().as_ref(), expected.digest().as_ref());
+    }
+
+    #[test]
+    fn dnskey_digest_unsupported() {
+        let dnskey = root_pubkey();
+        let owner = Dname::root();
+        assert_eq!(dnskey.digest(&owner, DigestAlg::Gost).is_err(), true);
     }
 }
