@@ -262,7 +262,7 @@ impl<N: fmt::Display> fmt::Display for Tsig<N> {
 
 //--- RtypeRecordData
 
-impl<N> RtypeRecordData for Tsig<N> {
+impl<N> RtypeRecordData for Tsig<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Tsig;
 }
 

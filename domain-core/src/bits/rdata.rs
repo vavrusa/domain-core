@@ -106,16 +106,16 @@ pub trait ParseRecordData: RecordData {
 /// [`RecordData`]: trait.RecordData.html
 /// [`ParseRecordData`]: trait.ParseRecordData.html
 /// [`ParseAll`]: ../parse/trait.ParseAll.html
-pub trait RtypeRecordData {
+pub trait RtypeRecordData: Eq + Ord {
     /// The record type of a value of this type.
     const RTYPE: Rtype;
 }
 
-impl<T: RtypeRecordData + Compose + Compress + Sized> RecordData for T {
+impl<T: RtypeRecordData + Compose + Compress + Sized + Eq + Ord> RecordData for T {
     fn rtype(&self) -> Rtype { Self::RTYPE }
 }
 
-impl<T: RtypeRecordData + ParseAll + Compose + Compress + Sized>
+impl<T: RtypeRecordData + ParseAll + Compose + Compress + Sized + Eq + Ord>
             ParseRecordData for T {
     type Err = <Self as ParseAll>::Err;
 

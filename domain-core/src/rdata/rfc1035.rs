@@ -117,7 +117,7 @@ macro_rules! dname_type {
 
         //--- RtypeRecordData
 
-        impl<N> RtypeRecordData for $target<N> {
+        impl<N> RtypeRecordData for $target<N> where N: Ord + Eq {
             const RTYPE: Rtype = Rtype::$rtype;
         }
 
@@ -567,7 +567,7 @@ impl<N: fmt::Display> fmt::Display for Minfo<N> {
 
 //--- RecordData
 
-impl<N> RtypeRecordData for Minfo<N> {
+impl<N> RtypeRecordData for Minfo<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Minfo;
 }
 
@@ -685,7 +685,7 @@ impl<N: fmt::Display> fmt::Display for Mx<N> {
 
 //--- RtypeRecordData
 
-impl<N> RtypeRecordData for Mx<N> {
+impl<N> RtypeRecordData for Mx<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Mx;
 }
 
@@ -833,11 +833,11 @@ impl<N> Ptr<N> {
 /// name server maintenance operations.
 ///
 /// The Soa record type is defined in RFC 1035, section 3.3.13.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Soa<N=ParsedDname> {
     mname: N,
     rname: N,
-    serial: Serial,
+    serial: u32,
     refresh: u32,
     retry: u32,
     expire: u32,
@@ -848,7 +848,7 @@ impl<N> Soa<N> {
     /// Creates new Soa record data from content.
     pub fn new(mname: N, rname: N, serial: Serial,
                refresh: u32, retry: u32, expire: u32, minimum: u32) -> Self {
-        Soa { mname, rname, serial, refresh, retry, expire, minimum }
+        Soa { mname, rname, serial: serial.into(), refresh, retry, expire, minimum }
     }
 
     /// The primary name server for the zone.
@@ -863,7 +863,7 @@ impl<N> Soa<N> {
 
     /// The serial number of the original copy of the zone.
     pub fn serial(&self) -> Serial {
-        self.serial
+        self.serial.into()
     }
 
     /// The time interval in seconds before the zone should be refreshed.
@@ -986,7 +986,7 @@ impl<N: fmt::Display> fmt::Display for Soa<N> {
 
 //--- RecordData
 
-impl<N> RtypeRecordData for Soa<N> {
+impl<N> RtypeRecordData for Soa<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Soa;
 }
 

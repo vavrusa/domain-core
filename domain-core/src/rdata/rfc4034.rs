@@ -207,14 +207,14 @@ impl RtypeRecordData for Dnskey {
 
 //------------ Rrsig ---------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Rrsig {
     type_covered: Rtype,
     algorithm: SecAlg,
     labels: u8,
     original_ttl: u32,
-    expiration: Serial,
-    inception: Serial,
+    expiration: u32,
+    inception: u32,
     key_tag: u16,
     signer_name: Dname,
     signature: Bytes,
@@ -238,8 +238,8 @@ impl Rrsig {
             algorithm,
             labels,
             original_ttl,
-            expiration,
-            inception,
+            expiration: expiration.into(),
+            inception: inception.into(),
             key_tag,
             signer_name,
             signature
@@ -263,11 +263,11 @@ impl Rrsig {
     }
 
     pub fn expiration(&self) -> Serial {
-        self.expiration
+        self.expiration.into()
     }
 
     pub fn inception(&self) -> Serial {
-        self.inception
+        self.inception.into()
     }
 
     pub fn key_tag(&self) -> u16 {
@@ -459,7 +459,7 @@ impl<N: fmt::Display> fmt::Display for Nsec<N> {
 
 //--- RtypeRecordData
 
-impl<N> RtypeRecordData for Nsec<N> {
+impl<N> RtypeRecordData for Nsec<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Nsec;
 }
 

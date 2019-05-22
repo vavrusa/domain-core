@@ -92,7 +92,7 @@ impl<N: Compose> Compress for Srv<N> {
 
 //--- RtypeRecordData
 
-impl<N> RtypeRecordData for Srv<N> {
+impl<N> RtypeRecordData for Srv<N> where N: Ord + Eq {
     const RTYPE: Rtype = Rtype::Srv;
 }
 

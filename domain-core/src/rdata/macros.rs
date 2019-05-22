@@ -161,7 +161,7 @@ macro_rules! rdata_types {
         //--- RecordData and ParseRecordData
 
         impl<N> ::bits::rdata::RecordData for MasterRecordData<N>
-        where N: ::bits::compose::Compose + ::bits::compose::Compress
+        where N: ::bits::compose::Compose + ::bits::compose::Compress + Ord + Eq
         {
             fn rtype(&self) -> ::iana::Rtype {
                 match *self {
@@ -449,7 +449,7 @@ macro_rules! rdata_types {
         //--- RecordData and ParseRecordData
 
         impl<N> ::bits::rdata::RecordData for AllRecordData<N>
-        where N: ::bits::compose::Compose + ::bits::compose::Compress
+        where N: ::bits::compose::Compose + ::bits::compose::Compress + Ord + Eq
         {
             fn rtype(&self) -> ::iana::Rtype {
                 match *self {
