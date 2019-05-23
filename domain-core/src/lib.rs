@@ -22,6 +22,8 @@ extern crate failure;
 extern crate rand;
 #[cfg(any(feature = "tsig", feature = "dnssec"))]
 extern crate ring;
+#[cfg(any(feature = "tsig", feature = "dnssec"))]
+extern crate untrusted;
 extern crate void;
 
 pub mod bits;

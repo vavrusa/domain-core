@@ -4,31 +4,33 @@
 //!
 //! [RFC 4034]: https://tools.ietf.org/html/rfc4034
 
-use std::{fmt, ptr};
+use bits::compose::{Compose, Compress, Compressor};
+use bits::name::{Dname, DnameBytesError};
+use bits::parse::{Parse, ParseAll, ParseAllError, Parser, ShortBuf};
+use bits::rdata::RtypeRecordData;
+use bits::record::Record;
+use bits::serial::Serial;
 use bytes::{BufMut, Bytes, BytesMut};
 use failure::Fail;
-use ::bits::compose::{Compose, Compress, Compressor};
-use ::bits::name::{Dname, DnameBytesError};
-use ::bits::parse::{Parse, ParseAll, ParseAllError, Parser, ShortBuf};
-use ::bits::rdata::RtypeRecordData;
-use ::bits::serial::Serial;
-use ::iana::{DigestAlg, Rtype, SecAlg};
-use ::master::scan::{CharSource, ScanError, Scan, Scanner};
-use ::utils::base64;
+use iana::{DigestAlg, Rtype, SecAlg};
+use master::scan::{CharSource, Scan, ScanError, Scanner};
+use std::{fmt, ptr};
+use utils::base64;
 
 #[cfg(feature = "dnssec")]
-use ::bits::name::ToDname;
+use bits::name::ToDname;
 #[cfg(feature = "dnssec")]
-use ring::digest;
+use ring::{digest, signature};
 
 //------------ AlgorithmError ------------------------------------------------
 
 #[derive(Clone, Debug, Fail)]
 pub enum AlgorithmError {
-    #[fail(display="unsupported algorithm")]
+    #[fail(display = "unsupported algorithm")]
     Unsupported,
+    #[fail(display = "bad signature")]
+    BadSig,
 }
-
 
 //------------ Dnskey --------------------------------------------------------
 
@@ -41,12 +43,7 @@ pub struct Dnskey {
 }
 
 impl Dnskey {
-    pub fn new(
-        flags: u16,
-        protocol: u8,
-        algorithm: SecAlg,
-        public_key: Bytes)
-    -> Self {
+    pub fn new(flags: u16, protocol: u8, algorithm: SecAlg, public_key: Bytes) -> Self {
         Dnskey {
             flags,
             protocol,
@@ -115,7 +112,11 @@ impl Dnskey {
     ///     DNSKEY RDATA = Flags | Protocol | Algorithm | Public Key.
     /// ```
     #[cfg(feature = "dnssec")]
-    pub fn digest<N: ToDname>(&self, dname: &N, algorithm: DigestAlg) -> Result<impl AsRef<[u8]>, AlgorithmError> {
+    pub fn digest<N: ToDname>(
+        &self,
+        dname: &N,
+        algorithm: DigestAlg,
+    ) -> Result<impl AsRef<[u8]>, AlgorithmError> {
         let mut buf: Vec<u8> = Vec::new();
         dname.compose(&mut buf);
         self.compose(&mut buf);
@@ -123,26 +124,74 @@ impl Dnskey {
         let mut ctx = match algorithm {
             DigestAlg::Sha1 => digest::Context::new(&digest::SHA1),
             DigestAlg::Sha256 => digest::Context::new(&digest::SHA256),
-            DigestAlg::Gost => { return Err(AlgorithmError::Unsupported); }
+            DigestAlg::Gost => {
+                return Err(AlgorithmError::Unsupported);
+            }
             DigestAlg::Sha384 => digest::Context::new(&digest::SHA384),
-            _ => { return Err(AlgorithmError::Unsupported); }
+            _ => {
+                return Err(AlgorithmError::Unsupported);
+            }
         };
 
         ctx.update(&buf);
         Ok(ctx.finish())
     }
-}
 
+    /// Calculates the key tag for this DNSKEY according to [RFC4034, Appendix B](https://tools.ietf.org/html/rfc4034#appendix-B).
+    pub fn key_tag(&self) -> u16 {
+        let mut buf = vec![];
+        self.compose(&mut buf);
+
+        let mut keytag: u32 = buf
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i & 1 != 0 {
+                    u32::from(*v)
+                } else {
+                    u32::from(*v) << 8
+                }
+            })
+            .sum();
+        keytag += (keytag >> 16) & 0xffff;
+        keytag &= 0xffff;
+        keytag as u16
+    }
+
+    // Extract public key exponent and modulus.
+    // See [RFC3110, Section 2](https://tools.ietf.org/html/rfc3110#section-2)
+    fn rsa_exponent_modulus(&self) -> Result<(&[u8], &[u8]), AlgorithmError> {
+        assert!(self.algorithm() == SecAlg::RsaSha1 || self.algorithm() == SecAlg::RsaSha256);
+
+        let public_key = self.public_key();
+        if public_key.len() <= 3 {
+            // TODO: return a better error
+            return Err(AlgorithmError::Unsupported);
+        }
+
+        let (pos, exp_len) = match public_key[0] {
+            0 => (
+                3,
+                (usize::from(public_key[1]) << 8) | usize::from(public_key[2]),
+            ),
+            len => (1, usize::from(len)),
+        };
+
+        // Check if there's enough space for exponent and modulus.
+        if public_key.len() < pos + exp_len {
+            return Err(AlgorithmError::Unsupported);
+        };
+
+        Ok(public_key[pos..].split_at(exp_len))
+    }
+}
 
 //--- ParseAll, Compose, and Compress
 
 impl ParseAll for Dnskey {
     type Err = ParseAllError;
 
-    fn parse_all(
-        parser: &mut Parser,
-        len: usize,
-    ) -> Result<Self, Self::Err> {
+    fn parse_all(parser: &mut Parser, len: usize) -> Result<Self, Self::Err> {
         if len < 4 {
             return Err(ParseAllError::ShortField);
         }
@@ -150,7 +199,7 @@ impl ParseAll for Dnskey {
             u16::parse(parser)?,
             u8::parse(parser)?,
             SecAlg::parse(parser)?,
-            Bytes::parse_all(parser, len - 4)?
+            Bytes::parse_all(parser, len - 4)?,
         ))
     }
 }
@@ -174,18 +223,15 @@ impl Compress for Dnskey {
     }
 }
 
-
 //--- Scan and Display
 
 impl Scan for Dnskey {
-    fn scan<C: CharSource>(
-        scanner: &mut Scanner<C>
-    ) -> Result<Self, ScanError> {
+    fn scan<C: CharSource>(scanner: &mut Scanner<C>) -> Result<Self, ScanError> {
         Ok(Self::new(
             u16::scan(scanner)?,
             u8::scan(scanner)?,
             SecAlg::scan(scanner)?,
-            scanner.scan_base64_phrases(Ok)?
+            scanner.scan_base64_phrases(Ok)?,
         ))
     }
 }
@@ -197,13 +243,11 @@ impl fmt::Display for Dnskey {
     }
 }
 
-
 //--- RecordData
 
 impl RtypeRecordData for Dnskey {
     const RTYPE: Rtype = Rtype::Dnskey;
 }
-
 
 //------------ Rrsig ---------------------------------------------------------
 
@@ -231,7 +275,7 @@ impl Rrsig {
         inception: Serial,
         key_tag: u16,
         signer_name: Dname,
-        signature: Bytes
+        signature: Bytes,
     ) -> Self {
         Rrsig {
             type_covered,
@@ -242,7 +286,7 @@ impl Rrsig {
             inception: inception.into(),
             key_tag,
             signer_name,
-            signature
+            signature,
         }
     }
 
@@ -281,8 +325,147 @@ impl Rrsig {
     pub fn signature(&self) -> &Bytes {
         &self.signature
     }
-}
 
+    /// Compose the signed data according to [RC4035, Section 5.3.2](https://tools.ietf.org/html/rfc4035#section-5.3.2).
+    ///
+    /// ```
+    ///    Once the RRSIG RR has met the validity requirements described in
+    ///    Section 5.3.1, the validator has to reconstruct the original signed
+    ///    data.  The original signed data includes RRSIG RDATA (excluding the
+    ///    Signature field) and the canonical form of the RRset.  Aside from
+    ///    being ordered, the canonical form of the RRset might also differ from
+    ///    the received RRset due to DNS name compression, decremented TTLs, or
+    ///    wildcard expansion.
+    /// ```
+    pub fn signed_data<N: ToDname, D: RtypeRecordData, B: BufMut>(
+        &self,
+        buf: &mut B,
+        records: &mut [Record<N, D>],
+    ) where
+        D: Compose + Compress + Sized + Ord + Eq,
+    {
+        // signed_data = RRSIG_RDATA | RR(1) | RR(2)...  where
+        //    "|" denotes concatenation
+        // RRSIG_RDATA is the wire format of the RRSIG RDATA fields
+        //    with the Signature field excluded and the Signer's Name
+        //    in canonical form.
+        self.type_covered.compose(buf);
+        self.algorithm.compose(buf);
+        self.labels.compose(buf);
+        self.original_ttl.compose(buf);
+        self.expiration.compose(buf);
+        self.inception.compose(buf);
+        self.key_tag.compose(buf);
+        self.signer_name.compose(buf);
+
+        // The set of all RR(i) is sorted into canonical order.
+        // See https://tools.ietf.org/html/rfc4034#section-6.3
+        records.sort_by(|a, b| a.data().cmp(b.data()));
+
+        // RR(i) = name | type | class | OrigTTL | RDATA length | RDATA
+        for rr in records {
+            // Handle expanded wildcards as per [RFC4035, Section 5.3.2](https://tools.ietf.org/html/rfc4035#section-5.3.2).
+            let rrsig_labels = usize::from(self.labels());
+            let fqdn = rr.owner();
+            // Subtract the root label from count as the algorithm doesn't accomodate that.
+            let mut fqdn_labels = fqdn.iter_labels().count() - 1;
+            if rrsig_labels < fqdn_labels {
+                // name = "*." | the rightmost rrsig_label labels of the fqdn
+                b"\x01*".compose(buf);
+                let mut fqdn = fqdn.to_name();
+                while fqdn_labels < rrsig_labels {
+                    fqdn.parent();
+                    fqdn_labels -= 1;
+                }
+                fqdn.compose(buf);
+            } else {
+                fqdn.compose(buf);
+            }
+
+            rr.rtype().compose(buf);
+            rr.class().compose(buf);
+            self.original_ttl.compose(buf);
+            let rdlen = rr.data().compose_len() as u16;
+            rdlen.compose(buf);
+            rr.data().compose(buf);
+        }
+    }
+
+    /// Attempt to use the cryptographic signature to authenticate the signed data, and thus authenticate the RRSET.
+    /// The signed data is expected to be calculated as per [RFC4035, Section 5.3.2](https://tools.ietf.org/html/rfc4035#section-5.3.2).
+    ///
+    /// [RFC4035, Section 5.3.2](https://tools.ietf.org/html/rfc4035#section-5.3.2):
+    /// ```
+    /// 5.3.3.  Checking the Signature
+    ///
+    ///    Once the resolver has validated the RRSIG RR as described in Section
+    ///    5.3.1 and reconstructed the original signed data as described in
+    ///    Section 5.3.2, the validator can attempt to use the cryptographic
+    ///    signature to authenticate the signed data, and thus (finally!)
+    ///    authenticate the RRset.
+    ///
+    ///    The Algorithm field in the RRSIG RR identifies the cryptographic
+    ///    algorithm used to generate the signature.  The signature itself is
+    ///    contained in the Signature field of the RRSIG RDATA, and the public
+    ///    key used to verify the signature is contained in the Public Key field
+    ///    of the matching DNSKEY RR(s) (found in Section 5.3.1).  [RFC4034]
+    ///    provides a list of algorithm types and provides pointers to the
+    ///    documents that define each algorithm's use.
+    /// ```
+    #[cfg(feature = "dnssec")]
+    pub fn verify_signed_data(
+        &self,
+        dnskey: &Dnskey,
+        signed_data: &Bytes,
+    ) -> Result<(), AlgorithmError> {
+        use untrusted::Input;
+
+        let message = untrusted::Input::from(signed_data);
+        let signature = Input::from(self.signature());
+
+        match self.algorithm {
+            SecAlg::RsaSha1 | SecAlg::RsaSha256 | SecAlg::RsaSha512 => {
+                let algorithm = match self.algorithm {
+                    SecAlg::RsaSha1 => &signature::RSA_PKCS1_2048_8192_SHA1,
+                    SecAlg::RsaSha256 => &signature::RSA_PKCS1_2048_8192_SHA256,
+                    SecAlg::RsaSha512 => &signature::RSA_PKCS1_2048_8192_SHA512,
+                    _ => unreachable!(),
+                };
+                // The key isn't available in either PEM or DER, so use the direct RSA verifier.
+                let (e, m) = dnskey.rsa_exponent_modulus()?;
+                signature::primitive::verify_rsa(
+                    algorithm,
+                    (Input::from(m), Input::from(e)),
+                    message,
+                    signature,
+                )
+                .map_err(|_| AlgorithmError::BadSig)
+            }
+            SecAlg::EcdsaP256Sha256 | SecAlg::EcdsaP384Sha384 => {
+                let algorithm = match self.algorithm {
+                    SecAlg::EcdsaP256Sha256 => &signature::ECDSA_P256_SHA256_FIXED,
+                    SecAlg::EcdsaP384Sha384 => &signature::ECDSA_P384_SHA384_FIXED,
+                    _ => unreachable!(),
+                };
+
+                // Add 0x4 identifier to the ECDSA pubkey as expected by ring.
+                let public_key = dnskey.public_key();
+                let mut key = Vec::with_capacity(public_key.len() + 1);
+                key.push(0x4);
+                key.extend_from_slice(&public_key);
+
+                signature::verify(algorithm, Input::from(&key), message, signature)
+                    .map_err(|_| AlgorithmError::BadSig)
+            }
+            SecAlg::Ed25519 => {
+                let key = dnskey.public_key();
+                signature::verify(&signature::ED25519, Input::from(&key), message, signature)
+                    .map_err(|_| AlgorithmError::BadSig)
+            }
+            _ => return Err(AlgorithmError::Unsupported),
+        }
+    }
+}
 
 //--- ParseAll, Compose, and Compress
 
@@ -300,15 +483,21 @@ impl ParseAll for Rrsig {
         let key_tag = u16::parse(parser)?;
         let signer_name = Dname::parse(parser)?;
         let len = if parser.pos() > start + len {
-            return Err(ShortBuf.into())
-        }
-        else {
+            return Err(ShortBuf.into());
+        } else {
             len - (parser.pos() - start)
         };
         let signature = Bytes::parse_all(parser, len)?;
         Ok(Self::new(
-            type_covered, algorithm, labels, original_ttl, expiration,
-            inception, key_tag, signer_name, signature
+            type_covered,
+            algorithm,
+            labels,
+            original_ttl,
+            expiration,
+            inception,
+            key_tag,
+            signer_name,
+            signature,
         ))
     }
 }
@@ -337,13 +526,10 @@ impl Compress for Rrsig {
     }
 }
 
-
 //--- Scan and Display
 
 impl Scan for Rrsig {
-    fn scan<C: CharSource>(
-        scanner: &mut Scanner<C>
-    ) -> Result<Self, ScanError> {
+    fn scan<C: CharSource>(scanner: &mut Scanner<C>) -> Result<Self, ScanError> {
         Ok(Self::new(
             Rtype::scan(scanner)?,
             SecAlg::scan(scanner)?,
@@ -353,28 +539,34 @@ impl Scan for Rrsig {
             Serial::scan_rrsig(scanner)?,
             u16::scan(scanner)?,
             Dname::scan(scanner)?,
-            scanner.scan_base64_phrases(Ok)?
+            scanner.scan_base64_phrases(Ok)?,
         ))
     }
 }
 
 impl fmt::Display for Rrsig {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {} {} {} {} {} {} {} ",
-               self.type_covered, self.algorithm, self.labels,
-               self.original_ttl, self.expiration, self.inception,
-               self.key_tag, self.signer_name)?;
+        write!(
+            f,
+            "{} {} {} {} {} {} {} {} ",
+            self.type_covered,
+            self.algorithm,
+            self.labels,
+            self.original_ttl,
+            self.expiration,
+            self.inception,
+            self.key_tag,
+            self.signer_name
+        )?;
         base64::display(&self.signature, f)
     }
 }
-
 
 //--- RtypeRecordData
 
 impl RtypeRecordData for Rrsig {
     const RTYPE: Rtype = Rtype::Rrsig;
 }
-
 
 //------------ Nsec ----------------------------------------------------------
 
@@ -398,20 +590,20 @@ impl<N> Nsec<N> {
     }
 }
 
-
 //--- ParseAll, Compose, and Compress
 
 impl<N: Parse> ParseAll for Nsec<N>
-where <N as Parse>::Err: Fail {
+where
+    <N as Parse>::Err: Fail,
+{
     type Err = ParseNsecError<<N as Parse>::Err>;
 
     fn parse_all(parser: &mut Parser, len: usize) -> Result<Self, Self::Err> {
         let start = parser.pos();
         let next_name = N::parse(parser).map_err(ParseNsecError::BadNextName)?;
         let len = if parser.pos() > start + len {
-            return Err(ShortBuf.into())
-        }
-        else {
+            return Err(ShortBuf.into());
+        } else {
             len - (parser.pos() - start)
         };
         let types = RtypeBitmap::parse_all(parser, len)?;
@@ -436,17 +628,11 @@ impl<N: Compose> Compress for Nsec<N> {
     }
 }
 
-
 //--- Scan and Display
 
 impl<N: Scan> Scan for Nsec<N> {
-    fn scan<C: CharSource>(
-        scanner: &mut Scanner<C>
-    ) -> Result<Self, ScanError> {
-        Ok(Self::new(
-            N::scan(scanner)?,
-            RtypeBitmap::scan(scanner)?,
-        ))
+    fn scan<C: CharSource>(scanner: &mut Scanner<C>) -> Result<Self, ScanError> {
+        Ok(Self::new(N::scan(scanner)?, RtypeBitmap::scan(scanner)?))
     }
 }
 
@@ -456,13 +642,14 @@ impl<N: fmt::Display> fmt::Display for Nsec<N> {
     }
 }
 
-
 //--- RtypeRecordData
 
-impl<N> RtypeRecordData for Nsec<N> where N: Ord + Eq {
+impl<N> RtypeRecordData for Nsec<N>
+where
+    N: Ord + Eq,
+{
     const RTYPE: Rtype = Rtype::Nsec;
 }
-
 
 //------------ Ds -----------------------------------------------------------
 
@@ -475,13 +662,13 @@ pub struct Ds {
 }
 
 impl Ds {
-    pub fn new(
-        key_tag: u16,
-        algorithm: SecAlg,
-        digest_type: DigestAlg,
-        digest: Bytes
-    ) -> Self {
-        Ds { key_tag, algorithm, digest_type, digest }
+    pub fn new(key_tag: u16, algorithm: SecAlg, digest_type: DigestAlg, digest: Bytes) -> Self {
+        Ds {
+            key_tag,
+            algorithm,
+            digest_type,
+            digest,
+        }
     }
 
     pub fn key_tag(&self) -> u16 {
@@ -501,7 +688,6 @@ impl Ds {
     }
 }
 
-
 //--- ParseAll, Compose, and Compress
 
 impl ParseAll for Ds {
@@ -509,13 +695,13 @@ impl ParseAll for Ds {
 
     fn parse_all(parser: &mut Parser, len: usize) -> Result<Self, Self::Err> {
         if len < 4 {
-            return Err(ShortBuf)
+            return Err(ShortBuf);
         }
         Ok(Self::new(
             u16::parse(parser)?,
             SecAlg::parse(parser)?,
             DigestAlg::parse(parser)?,
-            Bytes::parse_all(parser, len - 4)?
+            Bytes::parse_all(parser, len - 4)?,
         ))
     }
 }
@@ -539,13 +725,10 @@ impl Compress for Ds {
     }
 }
 
-
 //--- Scan and Display
 
 impl Scan for Ds {
-    fn scan<C: CharSource>(
-        scanner: &mut Scanner<C>
-    ) -> Result<Self, ScanError> {
+    fn scan<C: CharSource>(scanner: &mut Scanner<C>) -> Result<Self, ScanError> {
         Ok(Self::new(
             u16::scan(scanner)?,
             SecAlg::scan(scanner)?,
@@ -557,8 +740,11 @@ impl Scan for Ds {
 
 impl fmt::Display for Ds {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} {} {} ", self.key_tag, self.algorithm,
-               self.digest_type)?;
+        write!(
+            f,
+            "{} {} {} ",
+            self.key_tag, self.algorithm, self.digest_type
+        )?;
         for ch in self.digest() {
             write!(f, "{:02x}", ch)?
         }
@@ -566,13 +752,11 @@ impl fmt::Display for Ds {
     }
 }
 
-
 //--- RtypeRecordData
 
 impl RtypeRecordData for Ds {
     const RTYPE: Rtype = Rtype::Ds;
 }
-
 
 //------------ RtypeBitmap ---------------------------------------------------
 
@@ -586,10 +770,10 @@ impl RtypeBitmap {
             while !data.is_empty() {
                 let len = (data[1] as usize) + 2;
                 if len > 34 {
-                    return Err(RtypeBitmapError::BadRtypeBitmap)
+                    return Err(RtypeBitmapError::BadRtypeBitmap);
                 }
                 if data.len() < len {
-                    return Err(RtypeBitmapError::ShortBuf)
+                    return Err(RtypeBitmapError::ShortBuf);
                 }
                 data = &data[len..];
             }
@@ -615,7 +799,7 @@ impl RtypeBitmap {
         let mut data = self.0.as_ref();
         while !data.is_empty() {
             if data[0] == block {
-                return !((data[1] as usize) < octet || data[octet] & mask == 0)
+                return !((data[1] as usize) < octet || data[octet] & mask == 0);
             }
             data = &data[data[1] as usize..]
         }
@@ -635,7 +819,6 @@ impl AsRef<[u8]> for RtypeBitmap {
     }
 }
 
-
 //--- IntoIterator
 
 impl<'a> IntoIterator for &'a RtypeBitmap {
@@ -646,7 +829,6 @@ impl<'a> IntoIterator for &'a RtypeBitmap {
         self.iter()
     }
 }
-
 
 //--- ParseAll, Compose, Compress
 
@@ -675,13 +857,10 @@ impl Compress for RtypeBitmap {
     }
 }
 
-
 //--- Scan and Display
 
 impl Scan for RtypeBitmap {
-    fn scan<C: CharSource>(
-        scanner: &mut Scanner<C>
-    ) -> Result<Self, ScanError> {
+    fn scan<C: CharSource>(scanner: &mut Scanner<C>) -> Result<Self, ScanError> {
         let mut builder = RtypeBitmapBuilder::new();
         while let Ok(rtype) = Rtype::scan(scanner) {
             builder.add(rtype)
@@ -696,15 +875,13 @@ impl fmt::Display for RtypeBitmap {
         for rtype in self {
             if first {
                 rtype.fmt(f)?
-            }
-            else {
+            } else {
                 write!(f, " {}", rtype)?
             }
         }
         Ok(())
     }
 }
-
 
 //------------ RtypeBitmapBuilder --------------------------------------------
 
@@ -726,7 +903,7 @@ impl RtypeBitmapBuilder {
     pub fn new() -> Self {
         RtypeBitmapBuilder {
             // Start out with the capacity for one block.
-            buf: BytesMut::with_capacity(34)
+            buf: BytesMut::with_capacity(34),
         }
     }
 
@@ -743,27 +920,21 @@ impl RtypeBitmapBuilder {
         let mut pos = 0;
         while pos < self.buf.len() {
             if self.buf[pos] == block {
-                return &mut self.buf[pos..pos + 34]
-            }
-            else if self.buf[pos] > block {
+                return &mut self.buf[pos..pos + 34];
+            } else if self.buf[pos] > block {
                 let len = self.buf.len() - pos;
                 self.buf.extend_from_slice(&[0; 34]);
                 unsafe {
                     ptr::copy(
                         self.buf.as_ptr().offset(pos as isize),
                         self.buf.as_mut_ptr().offset(pos as isize + 34),
-                        len
+                        len,
                     );
-                    ptr::write_bytes(
-                        self.buf.as_mut_ptr().offset(pos as isize),
-                        0,
-                        34
-                    );
+                    ptr::write_bytes(self.buf.as_mut_ptr().offset(pos as isize), 0, 34);
                 }
                 self.buf[pos] = block;
-                return &mut self.buf[pos..pos + 34]
-            }
-            else {
+                return &mut self.buf[pos..pos + 34];
+            } else {
                 pos += 34
             }
         }
@@ -783,7 +954,7 @@ impl RtypeBitmapBuilder {
                     ptr::copy(
                         self.buf.as_ptr().offset(src_pos as isize),
                         self.buf.as_mut_ptr().offset(dst_pos as isize),
-                        len
+                        len,
                     )
                 }
             }
@@ -795,7 +966,6 @@ impl RtypeBitmapBuilder {
     }
 }
 
-
 //--- Default
 
 impl Default for RtypeBitmapBuilder {
@@ -803,7 +973,6 @@ impl Default for RtypeBitmapBuilder {
         Self::new()
     }
 }
-
 
 //------------ RtypeBitmapIter -----------------------------------------------
 
@@ -813,7 +982,7 @@ pub struct RtypeBitmapIter<'a> {
     len: usize,
 
     octet: usize,
-    bit: u16
+    bit: u16,
 }
 
 impl<'a> RtypeBitmapIter<'a> {
@@ -821,16 +990,18 @@ impl<'a> RtypeBitmapIter<'a> {
         if data.is_empty() {
             RtypeBitmapIter {
                 data,
-                block: 0, len: 0, octet: 0, bit: 0
+                block: 0,
+                len: 0,
+                octet: 0,
+                bit: 0,
             }
-        }
-        else {
+        } else {
             let mut res = RtypeBitmapIter {
                 data: &data[2..],
                 block: u16::from(data[0]) << 8,
                 len: usize::from(data[1]),
                 octet: 0,
-                bit: 0
+                bit: 0,
             };
             if res.data[0] & 0x80 == 0 {
                 res.advance()
@@ -856,7 +1027,7 @@ impl<'a> RtypeBitmapIter<'a> {
                 }
             }
             if self.data[self.octet] & (0x80 >> self.bit) != 0 {
-                return
+                return;
             }
         }
     }
@@ -867,28 +1038,26 @@ impl<'a> Iterator for RtypeBitmapIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.data.is_empty() {
-            return None
+            return None;
         }
-        let res = Rtype::from_int(
-            u16::from(self.data[0]) << 8 | (self.octet as u16) << 3 | self.bit
-        );
+        let res =
+            Rtype::from_int(u16::from(self.data[0]) << 8 | (self.octet as u16) << 3 | self.bit);
         self.advance();
         Some(res)
     }
 }
 
-
 //------------ ParseNsecError ------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum ParseNsecError<E: Fail> {
-    #[fail(display="short field")]
+    #[fail(display = "short field")]
     ShortField,
 
-    #[fail(display="{}", _0)]
+    #[fail(display = "{}", _0)]
     BadNextName(E),
 
-    #[fail(display="invalid record type bitmap")]
+    #[fail(display = "invalid record type bitmap")]
     BadRtypeBitmap,
 }
 
@@ -902,20 +1071,19 @@ impl<E: Fail> From<RtypeBitmapError> for ParseNsecError<E> {
     fn from(err: RtypeBitmapError) -> Self {
         match err {
             RtypeBitmapError::ShortBuf => ParseNsecError::ShortField,
-            RtypeBitmapError::BadRtypeBitmap => ParseNsecError::BadRtypeBitmap
+            RtypeBitmapError::BadRtypeBitmap => ParseNsecError::BadRtypeBitmap,
         }
     }
 }
-
 
 //------------ RtypeBitmapError ----------------------------------------------
 
 #[derive(Clone, Copy, Debug, Eq, Fail, PartialEq)]
 pub enum RtypeBitmapError {
-    #[fail(display="short field")]
+    #[fail(display = "short field")]
     ShortBuf,
 
-    #[fail(display="invalid record type bitmap")]
+    #[fail(display = "invalid record type bitmap")]
     BadRtypeBitmap,
 }
 
@@ -928,9 +1096,8 @@ impl From<ShortBuf> for RtypeBitmapError {
 //------------ parsed --------------------------------------------------------
 
 pub mod parsed {
-    pub use super::{Dnskey, Rrsig, Nsec, Ds};
+    pub use super::{Dnskey, Ds, Nsec, Rrsig};
 }
-
 
 //------------ Friendly Helper Functions -------------------------------------
 
@@ -940,7 +1107,7 @@ fn split_rtype(rtype: Rtype) -> (u8, usize, u8) {
     (
         (rtype >> 8) as u8,
         ((rtype & 0xFF) >> 3) as usize,
-        0x80u8 >> (rtype & 0x07)
+        0x80u8 >> (rtype & 0x07),
     )
 }
 
@@ -950,50 +1117,136 @@ fn split_rtype(rtype: Rtype) -> (u8, usize, u8) {
 mod test {
     extern crate base64;
     use super::*;
-    use ::iana::Rtype;
+    use iana::{Class, Rtype};
 
-    // Returns current root KSK for testing.
-    fn root_pubkey() -> Dnskey {
-        let pubkey = base64::decode("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU=").unwrap().into();
-        Dnskey::new(257, 3, SecAlg::RsaSha256, pubkey)
+    // Returns current root KSK/ZSK for testing.
+    fn root_pubkey() -> (Dnskey, Dnskey) {
+        let ksk = base64::decode("AwEAAaz/tAm8yTn4Mfeh5eyI96WSVexTBAvkMgJzkKTOiW1vkIbzxeF3+/4RgWOq7HrxRixHlFlExOLAJr5emLvN7SWXgnLh4+B5xQlNVz8Og8kvArMtNROxVQuCaSnIDdD5LKyWbRd2n9WGe2R8PzgCmr3EgVLrjyBxWezF0jLHwVN8efS3rCj/EWgvIWgb9tarpVUDK/b58Da+sqqls3eNbuv7pr+eoZG+SrDK6nWeL3c6H5Apxz7LjVc1uTIdsIXxuOLYA4/ilBmSVIzuDWfdRUfhHdY6+cn8HFRm+2hM8AnXGXws9555KrUB5qihylGa8subX2Nn6UwNR1AkUTV74bU=").unwrap().into();
+        let zsk = base64::decode("AwEAAeVDC34GZILwsQJy97K2Fst4P3XYZrXLyrkausYzSqEjSUulgh+iLgHg0y7FIF890+sIjXsk7KLJUmCOWfYWPorNKEOKLk5Zx/4M6D3IHZE3O3m/Eahrc28qQzmTLxiMZAW65MvR2UO3LxVtYOPBEBiDgAQD47x2JLsJYtavCzNL5WiUk59OgvHmDqmcC7VXYBhK8V8Tic089XJgExGeplKWUt9yyc31ra1swJX51XsOaQz17+vyLVH8AZP26KvKFiZeoRbaq6vl+hc8HQnI2ug5rA2zoz3MsSQBvP1f/HvqsWxLqwXXKyDD1QM639U+XzVB8CYigyscRP22QCnwKIU=").unwrap().into();
+        (
+            Dnskey::new(257, 3, SecAlg::RsaSha256, ksk),
+            Dnskey::new(256, 3, SecAlg::RsaSha256, zsk),
+        )
     }
 
     #[test]
     fn rtype_bitmap_builder() {
         let mut builder = RtypeBitmapBuilder::new();
         builder.add(Rtype::Int(1234)); // 0x04D2
-        builder.add(Rtype::A);         // 0x0001
-        builder.add(Rtype::Mx);        // 0x000F
-        builder.add(Rtype::Rrsig);     // 0x002E
-        builder.add(Rtype::Nsec);      // 0x002F
-        assert_eq!(builder.finalize().as_slice(),
-                   &b"\x00\x06\x40\x01\x00\x00\x00\x03\
+        builder.add(Rtype::A); // 0x0001
+        builder.add(Rtype::Mx); // 0x000F
+        builder.add(Rtype::Rrsig); // 0x002E
+        builder.add(Rtype::Nsec); // 0x002F
+        assert_eq!(
+            builder.finalize().as_slice(),
+            &b"\x00\x06\x40\x01\x00\x00\x00\x03\
                      \x04\x1b\x00\x00\x00\x00\x00\x00\
                      \x00\x00\x00\x00\x00\x00\x00\x00\
                      \x00\x00\x00\x00\x00\x00\x00\x00\
-                     \x00\x00\x00\x00\x20"[..]);
+                     \x00\x00\x00\x00\x20"[..]
+        );
     }
 
     #[test]
     fn dnskey_flags() {
-        let dnskey = root_pubkey();
-        assert_eq!(dnskey.is_zsk(), true);
-        assert_eq!(dnskey.is_secure_entry_point(), true);
-        assert_eq!(dnskey.is_revoked(), false);
+        let (ksk, zsk) = root_pubkey();
+        assert_eq!(ksk.is_zsk(), true);
+        assert_eq!(zsk.is_zsk(), true);
+        assert_eq!(ksk.is_secure_entry_point(), true);
+        assert_eq!(zsk.is_secure_entry_point(), false);
+        assert_eq!(ksk.is_revoked(), false);
+        assert_eq!(zsk.is_revoked(), false);
     }
 
     #[test]
     fn dnskey_digest() {
-        let dnskey = root_pubkey();
+        let (dnskey, _) = root_pubkey();
         let owner = Dname::root();
-        let expected = Ds::new(20326, SecAlg::RsaSha256, DigestAlg::Sha256, base64::decode("4G1EuAuPHTmpXAsNfGXQhFjogECbvGg0VxBCN8f47I0=").unwrap().into());
-        assert_eq!(dnskey.digest(&owner, DigestAlg::Sha256).unwrap().as_ref(), expected.digest().as_ref());
+        let expected = Ds::new(
+            20326,
+            SecAlg::RsaSha256,
+            DigestAlg::Sha256,
+            base64::decode("4G1EuAuPHTmpXAsNfGXQhFjogECbvGg0VxBCN8f47I0=")
+                .unwrap()
+                .into(),
+        );
+        assert_eq!(dnskey.key_tag(), expected.key_tag());
+        assert_eq!(
+            dnskey.digest(&owner, DigestAlg::Sha256).unwrap().as_ref(),
+            expected.digest().as_ref()
+        );
     }
 
     #[test]
     fn dnskey_digest_unsupported() {
-        let dnskey = root_pubkey();
+        let (dnskey, _) = root_pubkey();
         let owner = Dname::root();
         assert_eq!(dnskey.digest(&owner, DigestAlg::Gost).is_err(), true);
+    }
+
+    fn rrsig_verify_dnskey(ksk: Dnskey, zsk: Dnskey, rrsig: Rrsig) {
+        let mut records: Vec<_> = [&ksk, &zsk]
+            .iter()
+            .cloned()
+            .map(|x| Record::new(rrsig.signer_name().clone(), Class::In, 0, x.clone()))
+            .collect();
+        let signed_data = {
+            let mut buf = Vec::new();
+            rrsig.signed_data(&mut buf, records.as_mut_slice());
+            Bytes::from(buf)
+        };
+
+        // Test that the KSK is sorted after ZSK key
+        assert_eq!(ksk.key_tag(), rrsig.key_tag());
+        assert_eq!(ksk.key_tag(), records[1].data().key_tag());
+
+        // Test verifier
+        assert!(rrsig.verify_signed_data(&ksk, &signed_data).is_ok());
+        assert!(rrsig.verify_signed_data(&zsk, &signed_data).is_err());
+    }
+
+    #[test]
+    fn rrsig_verify_rsa_sha256() {
+        let (ksk, zsk) = root_pubkey();
+        let rrsig = Rrsig::new(Rtype::Dnskey, SecAlg::RsaSha256, 0, 172800, 1560211200.into(), 1558396800.into(), 20326, Dname::root(), base64::decode("otBkINZAQu7AvPKjr/xWIEE7+SoZtKgF8bzVynX6bfJMJuPay8jPvNmwXkZOdSoYlvFp0bk9JWJKCh8y5uoNfMFkN6OSrDkr3t0E+c8c0Mnmwkk5CETH3Gqxthi0yyRX5T4VlHU06/Ks4zI+XAgl3FBpOc554ivdzez8YCjAIGx7XgzzooEb7heMSlLc7S7/HNjw51TPRs4RxrAVcezieKCzPPpeWBhjE6R3oiSwrl0SBD4/yplrDlr7UHs/Atcm3MSgemdyr2sOoOUkVQCVpcj3SQQezoD2tCM7861CXEQdg5fjeHDtz285xHt5HJpA5cOcctRo4ihybfow/+V7AQ==").unwrap().into());
+        rrsig_verify_dnskey(ksk, zsk, rrsig);
+    }
+
+    #[test]
+    fn rrsig_verify_ecdsap256_sha256() {
+        let (ksk, zsk) = (
+            Dnskey::new(257, 3, SecAlg::EcdsaP256Sha256, base64::decode("mdsswUyr3DPW132mOi8V9xESWE8jTo0dxCjjnopKl+GqJxpVXckHAeF+KkxLbxILfDLUT0rAK9iUzy1L53eKGQ==").unwrap().into()),
+            Dnskey::new(256, 3, SecAlg::EcdsaP256Sha256, base64::decode("oJMRESz5E4gYzS/q6XDrvU1qMPYIjCWzJaOau8XNEZeqCYKD5ar0IRd8KqXXFJkqmVfRvMGPmM1x8fGAa2XhSA==").unwrap().into()),
+        );
+
+        let owner = Dname::from_slice(b"\x0acloudflare\x03com\x00").unwrap();
+        let rrsig = Rrsig::new(Rtype::Dnskey, SecAlg::EcdsaP256Sha256, 2, 3600, 1560314494.into(), 1555130494.into(), 2371, owner.clone(), base64::decode("8jnAGhG7O52wmL065je10XQztRX1vK8P8KBSyo71Z6h5wAT9+GFxKBaEzcJBLvRmofYFDAhju21p1uTfLaYHrg==").unwrap().into());
+        rrsig_verify_dnskey(ksk, zsk, rrsig);
+    }
+
+    #[test]
+    fn rrsig_verify_ed25519() {
+        let (ksk, zsk) = (
+            Dnskey::new(
+                257,
+                3,
+                SecAlg::Ed25519,
+                base64::decode("m1NELLVVQKl4fHVn/KKdeNO0PrYKGT3IGbYseT8XcKo=")
+                    .unwrap()
+                    .into(),
+            ),
+            Dnskey::new(
+                256,
+                3,
+                SecAlg::Ed25519,
+                base64::decode("2tstZAjgmlDTePn0NVXrAHBJmg84LoaFVxzLl1anjGI=")
+                    .unwrap()
+                    .into(),
+            ),
+        );
+
+        let owner = Dname::from_slice(b"\x07ed25519\x02nl\x00").unwrap();
+        let rrsig = Rrsig::new(Rtype::Dnskey, SecAlg::Ed25519, 2, 3600, 1559174400.into(), 1557360000.into(), 45515, owner.clone(), base64::decode("hvPSS3E9Mx7lMARqtv6IGiw0NE0uz0mZewndJCHTkhwSYqlasUq7KfO5QdtgPXja7YkTaqzrYUbYk01J8ICsAA==").unwrap().into());
+        rrsig_verify_dnskey(ksk, zsk, rrsig);
     }
 }
