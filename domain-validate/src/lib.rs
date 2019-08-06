@@ -67,8 +67,8 @@ impl DnskeyExt for Dnskey {
         algorithm: DigestAlg,
     ) -> Result<digest::Digest, AlgorithmError> {
         let mut buf: Vec<u8> = Vec::new();
-        dname.compose(&mut buf);
-        self.compose(&mut buf);
+        dname.compose_canonical(&mut buf);
+        self.compose_canonical(&mut buf);
 
         let mut ctx = match algorithm {
             DigestAlg::Sha1 => digest::Context::new(&digest::SHA1_FOR_LEGACY_USE_ONLY),
