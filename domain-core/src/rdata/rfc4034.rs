@@ -823,7 +823,7 @@ impl RtypeBitmap {
         while !data.is_empty() {
             let ((window_num, window), next_data) = read_window(data).unwrap();
             if window_num == block {
-                return !(window.len() < octet || window[octet] & mask == 0);
+                return !(window.len() <= octet || window[octet] & mask == 0);
             }
             data = next_data;
         }
