@@ -200,7 +200,7 @@ impl RrsigExt for Rrsig {
                 let algorithm = match self.algorithm() {
                     SecAlg::RsaSha1 | SecAlg::RsaSha1Nsec3Sha1 => &signature::RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
                     SecAlg::RsaSha256 => &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-                    SecAlg::RsaSha512 => &signature::RSA_PKCS1_2048_8192_SHA512,
+                    SecAlg::RsaSha512 => &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY,
                     _ => unreachable!(),
                 };
                 // The key isn't available in either PEM or DER, so use the direct RSA verifier.

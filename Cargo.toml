@@ -2,4 +2,4 @@
 members = ["domain", "domain-core", "domain-resolv", "domain-sign", "domain-tsig", "domain-validate", "interop"]
 
 [patch.crates-io]
-ring = { git = "https://github.com/andrewtj/ring.git", rev = "eedb0514fb73e1034eefbec10140af8a51effff3"}
+ring = { git = "https://github.com/vavrusa/ring.git", rev = "993f050c759376f918b1cfcc5bffc7a63e2f2fca"}
