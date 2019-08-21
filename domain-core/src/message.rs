@@ -19,7 +19,7 @@ use crate::header::{Header, HeaderCounts, HeaderSection};
 use crate::iana::{Rcode, Rtype};
 use crate::rdata::Cname;
 use crate::message_builder::{
-    MessageBuilder, AdditionalBuilder, RecordSectionBuilder
+    AdditionalBuilder, AnswerBuilder, RecordSectionBuilder
 };
 use crate::name::{ParsedDname, ParsedDnameError, ToDname};
 use crate::opt::{Opt, OptRecord};
@@ -288,11 +288,10 @@ impl Message {
     ///
     /// The method uses `op` to process records from all packet sections before inserting,
     /// caller can use this closure to filter or manipulate records before inserting.
-    pub fn copy_records<N, D, R, F>(&self, target: MessageBuilder, op: F) -> Result<AdditionalBuilder, ParsedDnameError>
+    pub fn copy_records<N, D, R, F>(&self, mut target: AnswerBuilder, op: F) -> Result<AdditionalBuilder, ParsedDnameError>
     where N: ToDname, D: RecordData, R: Into<Record<N, D>>, F: FnMut(Result<ParsedRecord, ParsedDnameError>) -> Option<R> + Copy
     {
         // Copy answer, authority, and additional records.
-        let mut target = target.answer();
         for rr in self.answer()?.filter_map(op) {
             target.push(rr)?;
         }
@@ -933,7 +932,7 @@ mod test {
     #[test]
     fn copy_records() {
         let msg = get_test_message();
-        let target = MessageBuilder::with_capacity(512);
+        let target = MessageBuilder::with_capacity(512).answer();
         let res = msg.copy_records(target, |rec| {
             if let Ok(rr) = rec {
                 if let Ok(Some(rr)) = rr.into_record::<AllRecordData<ParsedDname>>() {
