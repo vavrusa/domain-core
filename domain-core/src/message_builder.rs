@@ -337,7 +337,7 @@ impl MessageBuilder {
     /// Specifically, this sets the ID, QR, OPCODE, RD, and RCODE fields
     /// in the header and attempts to push the message’s questions to the
     /// builder. If iterating of the questions fails, it adds what it can.
-    pub fn start_answer(&mut self, msg: &Message, rcode: Rcode) {
+    pub fn start_answer(&mut self, msg: &Message, rcode: Rcode) -> Result<(), ShortBuf> {
         {
             let header = self.header_mut();
             header.set_id(msg.header().id());
@@ -348,9 +348,11 @@ impl MessageBuilder {
         }
         for item in msg.question() {
             if let Ok(item) = item {
-                self.push(item).unwrap();
+                self.push(item)?;
             }
         }
+
+        Ok(())
     }
 
     /// Creates an AXFR request for the given domain.
