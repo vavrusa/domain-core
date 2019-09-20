@@ -783,6 +783,10 @@ impl RtypeBitmap {
         {
             let mut data = bytes.as_ref();
             while !data.is_empty() {
+                // At least bitmap # and length must be present
+                if data.len() < 2 {
+                    return Err(RtypeBitmapError::ShortBuf)
+                }
                 let len = (data[1] as usize) + 2;
                 // https://tools.ietf.org/html/rfc4034#section-4.1.2:
                 //  Blocks with no types present MUST NOT be included.
