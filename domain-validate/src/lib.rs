@@ -1,7 +1,7 @@
 use bytes::{BufMut, Bytes};
 use derive_more::Display;
 use domain_core::iana::{DigestAlg, SecAlg};
-use domain_core::rdata::{Dnskey, Rrsig, RecordData};
+use domain_core::rdata::{Dnskey, RecordData, Rrsig};
 use domain_core::{CanonicalOrd, Compose, Compress, Record, ToDname};
 use ring::{digest, signature};
 use std::error;
@@ -203,6 +203,10 @@ impl RrsigExt for Rrsig {
                     SecAlg::RsaSha512 => &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY,
                     _ => unreachable!(),
                 };
+                // Check for minimum supported key size
+                if 8 * self.signature().len() < 1024 {
+                    return Err(AlgorithmError::Unsupported);
+                }
                 // The key isn't available in either PEM or DER, so use the direct RSA verifier.
                 let (e, n) = rsa_exponent_modulus(dnskey)?;
                 let public_key = signature::RsaPublicKeyComponents { n: &n, e: &e };
