@@ -11,22 +11,20 @@
 //!
 //! [`Message`]: struct.Message.html
 
-
-use std::{mem, ops};
-use std::marker::PhantomData;
-use bytes::{Bytes, BytesMut};
 use crate::header::{Header, HeaderCounts, HeaderSection};
 use crate::iana::{Rcode, Rtype};
-use crate::rdata::Cname;
-use crate::message_builder::{
-    AdditionalBuilder, AnswerBuilder, RecordSectionBuilder
-};
+use crate::message_builder::{AdditionalBuilder, AnswerBuilder, RecordSectionBuilder};
 use crate::name::{ParsedDname, ParsedDnameError, ToDname};
 use crate::opt::{Opt, OptRecord};
 use crate::parse::{Parse, Parser, ShortBuf};
 use crate::question::Question;
+use crate::rdata::Cname;
 use crate::rdata::{ParseRecordData, RecordData};
 use crate::record::{ParsedRecord, Record, RecordParseError};
+use bytes::{Bytes, BytesMut};
+use std::collections::HashSet;
+use std::marker::PhantomData;
+use std::{mem, ops};
 
 //------------ Message -------------------------------------------------------
 
@@ -370,6 +368,7 @@ impl Message {
             Err(_) => return None,
         };
 
+        let mut visited = HashSet::new();
         loop {
             let mut found = false;
             for record in answer.clone() {
@@ -379,15 +378,22 @@ impl Message {
                 };
                 if *record.owner() == name {
                     name = record.data().cname().clone();
+
+                    // Check if the CNAME target was already visited to break loops.
+                    if visited.contains(&name) {
+                        break;
+                    }
+
+                    visited.insert(name.clone());
                     found = true;
                     break;
                 }
             }
             if !found {
-                break
+                break;
             }
         }
-        
+
         Some(name)
     }
 
@@ -950,5 +956,21 @@ mod test {
             assert_eq!(1, msg.header_counts().ancount());
             assert_eq!(0, msg.header_counts().arcount());
         }
+    }
+
+    #[test]
+    fn canonical_name_loop() {
+        let target = Dname::from_str("foo.example.com.").unwrap();
+        let msg = {
+            let mut msg = MessageBuilder::with_capacity(512);
+            msg.push((target.clone(), Rtype::A)).unwrap();
+            let mut msg = msg.answer();
+            msg.push((target.clone(), 86000, Cname::new(target.clone())))
+                .unwrap();
+            msg.freeze()
+        };
+
+        let cname = msg.canonical_name().map(|n| n.to_name());
+        assert_eq!(cname, Some(target));
     }
 }
