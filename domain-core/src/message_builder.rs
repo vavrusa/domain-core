@@ -601,7 +601,7 @@ impl OptBuilder {
         let pos = target.len();
         target.compose(&OptHeader::default())?;
         target.compose(&0u16)?;
-        target.counts_mut().inc_arcount();
+        target.counts_mut().inc_arcount()?;
         Ok(OptBuilder { pos, target })
     }
 
@@ -728,8 +728,8 @@ impl MessageTarget {
     /// messages header to reflect the new element.
     fn push<O, I, E>(&mut self, composeop: O, incop: I) -> Result<(), E>
             where O: FnOnce(&mut Compressor) -> Result<(), E>,
-                  I: FnOnce(&mut HeaderCounts) {
-        composeop(&mut self.buf).map(|()| incop(self.counts_mut()))
+                  I: FnOnce(&mut HeaderCounts) -> Result<(), E> {
+        composeop(&mut self.buf).and_then(|()| incop(self.counts_mut()))
     }
 
     fn snapshot<T>(&self) -> Snapshot<T> {

@@ -367,14 +367,12 @@ impl HeaderCounts {
     }
 
     /// Increases the value of the QDCOUNT field by one.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the count is already at its maximum.
-    pub fn inc_qdcount(&mut self) {
+    pub fn inc_qdcount(&mut self) -> Result<(), ShortBuf> {
         let count = self.qdcount();
-        assert!(count < ::std::u16::MAX);
-        self.set_qdcount(count + 1);
+        if count >= ::std::u16::MAX {
+            return Err(ShortBuf);
+        }
+        Ok(self.set_qdcount(count + 1))
     }
 
     /// Decreases the value of the QDCOUNT field by one.
@@ -403,14 +401,12 @@ impl HeaderCounts {
     }
 
     /// Increases the value of the ANCOUNT field by one.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the count is already at its maximum.
-    pub fn inc_ancount(&mut self) {
+    pub fn inc_ancount(&mut self) -> Result<(), ShortBuf> {
         let count = self.ancount();
-        assert!(count < ::std::u16::MAX);
-        self.set_ancount(count + 1);
+        if count >= ::std::u16::MAX {
+            return Err(ShortBuf);
+        }
+        Ok(self.set_ancount(count + 1))
     }
 
     /// Decreases the value of the ANCOUNT field by one.
@@ -438,14 +434,12 @@ impl HeaderCounts {
     }
 
     /// Increases the value of the NSCOUNT field by one.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the count is already at its maximum.
-    pub fn inc_nscount(&mut self) {
+    pub fn inc_nscount(&mut self)  -> Result<(), ShortBuf> {
         let count = self.nscount();
-        assert!(count < ::std::u16::MAX);
-        self.set_nscount(count + 1);
+        if count >= ::std::u16::MAX {
+            return Err(ShortBuf);
+        }
+        Ok(self.set_nscount(count + 1))
     }
 
     /// Decreases the value of the NSCOUNT field by one.
@@ -473,14 +467,12 @@ impl HeaderCounts {
     }
 
     /// Increases the value of the ARCOUNT field by one.
-    ///
-    /// # Panics
-    ///
-    /// This method panics if the count is already at its maximum.
-    pub fn inc_arcount(&mut self) {
+    pub fn inc_arcount(&mut self)  -> Result<(), ShortBuf> {
         let count = self.arcount();
-        assert!(count < ::std::u16::MAX);
-        self.set_arcount(count + 1);
+        if count >= ::std::u16::MAX {
+            return Err(ShortBuf);
+        }
+        Ok(self.set_arcount(count + 1))
     }
 
     /// Decreases the value of the ARCOUNT field by one.
@@ -740,10 +732,10 @@ mod test {
         assert_eq!(c.ancount(), 0x0304);
         assert_eq!(c.nscount(), 0x0506);
         assert_eq!(c.arcount(), 0x0708);
-        c.inc_qdcount();
-        c.inc_ancount();
-        c.inc_nscount();
-        c.inc_arcount();
+        c.inc_qdcount().expect("ok");
+        c.inc_ancount().expect("ok");
+        c.inc_nscount().expect("ok");
+        c.inc_arcount().expect("ok");
         assert_eq!(c.inner, [ 1, 3, 3, 5, 5, 7, 7, 9 ]);
         c.set_qdcount(0x0807);
         c.set_ancount(0x0605);
@@ -772,7 +764,7 @@ mod test {
         let mut c = HeaderCounts {
             inner: [ 0xff, 0xff,0xff,0xff,0xff,0xff,0xff,0xff ]
         };
-        c.inc_qdcount()
+        c.inc_qdcount().unwrap()
     }
 
     #[test]
@@ -781,7 +773,7 @@ mod test {
         let mut c = HeaderCounts {
             inner: [ 0xff, 0xff,0xff,0xff,0xff,0xff,0xff,0xff ]
         };
-        c.inc_ancount()
+        c.inc_ancount().unwrap()
     }
 
     #[test]
@@ -790,7 +782,7 @@ mod test {
         let mut c = HeaderCounts {
             inner: [ 0xff, 0xff,0xff,0xff,0xff,0xff,0xff,0xff ]
         };
-        c.inc_nscount()
+        c.inc_nscount().unwrap()
     }
 
     #[test]
@@ -799,6 +791,6 @@ mod test {
         let mut c = HeaderCounts {
             inner: [ 0xff, 0xff,0xff,0xff,0xff,0xff,0xff,0xff ]
         };
-        c.inc_arcount()
+        c.inc_arcount().unwrap()
     }
 }

@@ -184,7 +184,7 @@ impl<'a> OptBuilder<'a> {
         query.target.reserve(header.compose_len() + 2);
         header.compose(&mut query.target);
         0u16.compose(&mut query.target);
-        query.counts_mut().inc_arcount();
+        assert!(query.counts_mut().inc_arcount().is_ok());
         query.update_shim();
         OptBuilder { query, pos }
     }
