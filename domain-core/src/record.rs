@@ -341,7 +341,7 @@ impl<N: ToDname, D: RecordData> Compose for Record<N, D> {
 
 impl<N: ToDname, D: RecordData + Compress> Compress for Record<N, D> {
     fn compress(&self, buf: &mut Compressor) -> Result<(), ShortBuf> {
-        self.owner.compress(buf)?;
+        buf.compress_name(&self.owner)?;
         buf.compose(&self.rtype())?;
         buf.compose(&self.class)?;
         buf.compose(&self.ttl)?;

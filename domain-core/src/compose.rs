@@ -497,17 +497,15 @@ impl Compressor {
     }
 
     /// Grows the buffer size once.
-    ///
-    /// This may panic if used to grow beyond the limit.
-    fn grow(&mut self) {
+    fn grow(&mut self) -> Result<(), ShortBuf> {
         if self.page_size == 0 {
-            let additional = self.limit.checked_sub(self.buf.capacity())
-                                 .unwrap();
-            self.buf.reserve(additional)
-        }
-        else {
+            let additional = self.limit.checked_sub(self.buf.capacity()).ok_or(ShortBuf)?;
+            self.buf.reserve(additional);
+        } else {
             self.buf.reserve(self.page_size)
         }
+
+        Ok(())
     }
 }
 
@@ -575,14 +573,14 @@ impl BufMut for Compressor {
     unsafe fn advance_mut(&mut self, cnt: usize) {
         assert!(cnt <= self.remaining_mut());
         while cnt > self.buf.remaining_mut() {
-            self.grow();
+            self.grow().unwrap();
         }
         self.buf.advance_mut(cnt)
     }
 
     unsafe fn bytes_mut(&mut self) -> &mut [u8] {
         if self.buf.remaining_mut() == 0 && self.remaining_mut() > 0 {
-            self.grow()
+            self.grow().unwrap();
         }
         self.buf.bytes_mut()
     }
