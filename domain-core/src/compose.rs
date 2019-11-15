@@ -567,7 +567,7 @@ impl ops::DerefMut for Compressor {
 
 impl BufMut for Compressor {
     fn remaining_mut(&self) -> usize {
-        self.limit - self.buf.len()
+        self.limit.checked_sub(self.buf.len()).unwrap_or(0)
     }
 
     unsafe fn advance_mut(&mut self, cnt: usize) {
