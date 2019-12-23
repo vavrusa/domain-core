@@ -1063,7 +1063,7 @@ impl<'a> RtypeBitmapIter<'a> {
     fn advance(&mut self) {
         loop {
             self.bit += 1;
-            if self.bit == 7 {
+            if self.bit == 8 {
                 self.bit = 0;
                 self.octet += 1;
                 if self.octet == self.len {
@@ -1072,11 +1072,13 @@ impl<'a> RtypeBitmapIter<'a> {
                         return;
                     }
                     self.block = u16::from(self.data[0]) << 8;
-                    self.len = self.data[1] as usize;
+                    self.len = usize::from(self.data[1]);
+                    self.data = &self.data[2..];
                     self.octet = 0;
                 }
             }
             if self.data[self.octet] & (0x80 >> self.bit) != 0 {
+                eprintln!("bit {:?} octet {} len {}", self.bit, self.octet, self.len);
                 return
             }
         }
