@@ -1063,7 +1063,7 @@ impl<'a> RtypeBitmapIter<'a> {
     fn advance(&mut self) {
         loop {
             self.bit += 1;
-            if self.bit == 7 {
+            if self.bit == 8 {
                 self.bit = 0;
                 self.octet += 1;
                 if self.octet == self.len {
@@ -1072,7 +1072,8 @@ impl<'a> RtypeBitmapIter<'a> {
                         return;
                     }
                     self.block = u16::from(self.data[0]) << 8;
-                    self.len = self.data[1] as usize;
+                    self.len = usize::from(self.data[1]);
+                    self.data = &self.data[2..];
                     self.octet = 0;
                 }
             }
@@ -1238,6 +1239,19 @@ mod test {
         assert!(bitmap.contains(Rtype::Int(1234)));
         assert!(!bitmap.contains(Rtype::Int(1235)));
         assert!(!bitmap.contains(Rtype::Ns));
+    }
+
+    #[test]
+    fn rtype_bitmap_iter() {
+        let mut builder = RtypeBitmapBuilder::new();
+        let types = vec![Rtype::Ns, Rtype::Soa, Rtype::Mx, Rtype::Txt, Rtype::Rrsig, Rtype::Dnskey, Rtype::Nsec3param, Rtype::Spf, Rtype::Caa];
+        for t in types.iter()  {
+            builder.add(*t);
+        }
+
+        let bitmap = builder.finalize();
+        let bitmap_types: Vec<_> = bitmap.iter().collect();
+        assert_eq!(types, bitmap_types);
     }
 
     #[test]
