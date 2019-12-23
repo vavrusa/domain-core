@@ -307,7 +307,6 @@ impl ParseAll for ParsedDname {
         let end = tmp.pos() + len;
         let res = Self::parse(&mut tmp)?;
         if tmp.pos() < end {
-            println!("pos: {}, end: {}", tmp.pos(), end);
             return Err(ParsedDnameAllError::TrailingData)
         }
         else if tmp.pos() > end {
