@@ -214,6 +214,18 @@ macro_rules! rdata_types {
                     MasterRecordData::__Nonexhaustive(_) => unreachable!(),
                 }
             }
+
+            fn compose_canonical<B: ::bytes::BufMut>(&self, buf: &mut B) {
+                match *self {
+                    $( $( $(
+                        MasterRecordData::$mtype(ref inner) => {
+                            inner.compose_canonical(buf)
+                        }
+                    )* )* )*
+                    MasterRecordData::Other(ref inner) => inner.compose_canonical(buf),
+                    MasterRecordData::__Nonexhaustive(_) => unreachable!(),
+                }
+            }
         }
 
         impl<N> $crate::compose::Compress for MasterRecordData<N>
@@ -493,6 +505,24 @@ macro_rules! rdata_types {
                     )* )* )*
                     AllRecordData::Opt(ref inner) => inner.compose(buf),
                     AllRecordData::Other(ref inner) => inner.compose(buf),
+                    AllRecordData::__Nonexhaustive(_) => unreachable!(),
+                }
+            }
+
+            fn compose_canonical<B: ::bytes::BufMut>(&self, buf: &mut B) {
+                match *self {
+                    $( $( $(
+                        AllRecordData::$mtype(ref inner) => {
+                            inner.compose_canonical(buf)
+                        }
+                    )* )* )*
+                    $( $( $(
+                        AllRecordData::$ptype(ref inner) => {
+                            inner.compose_canonical(buf)
+                        }
+                    )* )* )*
+                    AllRecordData::Opt(ref inner) => inner.compose_canonical(buf),
+                    AllRecordData::Other(ref inner) => inner.compose_canonical(buf),
                     AllRecordData::__Nonexhaustive(_) => unreachable!(),
                 }
             }
