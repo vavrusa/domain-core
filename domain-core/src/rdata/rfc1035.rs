@@ -1520,7 +1520,7 @@ impl Wks {
         let octet = (port / 8) as usize;
         let bit = (port % 8) as usize;
         match self.bitmap.get(octet) {
-            Some(x) => (x >> bit) > 0,
+            Some(x) => (x & (1 << (7 - bit))) > 0,
             None => false
         }
     }
@@ -1634,8 +1634,13 @@ impl WksIter {
         WksIter { bitmap, octet: 0, bit: 0 }
     }
 
-    fn serves(&self) -> bool {
-        (self.bitmap[self.octet] >> self.bit) > 0
+    fn serves(&self, octet: usize, bit: usize) -> bool {
+        (self.bitmap[octet] & (1 << (7 - bit))) > 0
+    }
+
+    fn advance(&mut self) {
+        if self.bit == 7 { self.octet += 1; self.bit = 0 }
+        else { self.bit += 1 }
     }
 }
 
@@ -1646,11 +1651,11 @@ impl Iterator for WksIter {
         loop {
             if self.octet >= self.bitmap.len() { return None }
             else {
-                if self.serves() {
-                    return Some((self.octet * 8 + self.bit) as u16)
+                let (octet, bit) = (self.octet, self.bit);
+                self.advance();
+                if self.serves(octet, bit) {
+                    return Some((octet * 8 + bit) as u16)
                 }
-                if self.bit == 7 { self.octet += 1; self.bit = 0 }
-                else { self.bit += 1 }
             }
         }
     }
@@ -1672,12 +1677,12 @@ impl WksBuilder {
     }
 
     pub fn add_service(&mut self, service: u16) {
-        let octet = (service >> 2) as usize;
-        let bit = 1 << (service & 0x3);
-        while self.bitmap.len() < octet + 1 {
-            self.bitmap.extend_from_slice(b"0")
+        let octet = (service / 8) as usize;
+        let bit = service % 8;
+        while self.bitmap.len() <= octet {
+            self.bitmap.extend_from_slice(b"\0")
         }
-        self.bitmap[octet] |= bit;
+        self.bitmap[octet] |= 1 << (7 - bit);
     }
 
     pub fn finish(self) -> Wks {
@@ -1709,3 +1714,26 @@ pub mod parsed {
     pub use super::Wks;
 }
 
+//============ Test ==========================================================
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn wks_builder() {
+        let mut builder = WksBuilder::new(Ipv4Addr::LOCALHOST, 6); // TCP
+        builder.add_service(1);
+        builder.add_service(25); // SMTP
+        let wks = builder.finish();
+        assert_eq!(&wks.bitmap()[..], &[64,0,0,64]);
+        assert_eq!(wks.protocol(), 6);
+        assert_eq!(wks.serves(1), true);
+        assert_eq!(wks.serves(25), true);
+        assert_eq!(wks.serves(24), false);
+        let mut iter = wks.iter();
+        assert_eq!(iter.next(), Some(1));
+        assert_eq!(iter.next(), Some(25));
+        assert_eq!(iter.next(), None);
+    }
+}
