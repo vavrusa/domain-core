@@ -345,12 +345,13 @@ impl Compose for OptionHeader {
 #[derive(Clone, Debug)]
 pub struct OptIter<D: OptData> { 
     parser: Parser,
-    marker: PhantomData<D>
+    marker: PhantomData<D>,
+    fused: bool
 }
 
 impl<D: OptData> OptIter<D> {
     fn new(bytes: Bytes) -> Self {
-        OptIter { parser: Parser::from_bytes(bytes), marker: PhantomData }
+        OptIter { parser: Parser::from_bytes(bytes), marker: PhantomData, fused: false }
     }
 }
 
@@ -358,11 +359,14 @@ impl<D: OptData> Iterator for OptIter<D> {
     type Item = Result<D, D::ParseErr>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.parser.remaining() > 0 {
+        while !self.fused && self.parser.remaining() > 0 {
             match self.next_step() {
                 Ok(Some(res)) => return Some(Ok(res)),
                 Ok(None) => { }
-                Err(err) => return Some(Err(err)),
+                Err(err) => {
+                    self.fused = true;
+                    return Some(Err(err))
+                },
             }
         }
         None
