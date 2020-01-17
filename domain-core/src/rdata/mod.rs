@@ -63,7 +63,6 @@ rdata_types! {
             Ptr<N>,
             Soa<N>,
             Txt,
-            Wks,
         }
         pseudo {
             Null,
