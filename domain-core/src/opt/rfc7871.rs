@@ -10,6 +10,8 @@ use crate::message_builder::OptBuilder;
 use crate::parse::{ParseAll, Parser, ShortBuf};
 use super::CodeOptData;
 
+// Option fixed header length
+const HEADER_LEN: usize = 4;
 
 //------------ ClientSubnet --------------------------------------------------
 
@@ -48,26 +50,36 @@ impl ParseAll for ClientSubnet {
         let family = parser.parse_u16()?;
         let source_prefix_len = parser.parse_u8()?;
         let scope_prefix_len = parser.parse_u8()?;
+
+        // https://tools.ietf.org/html/rfc7871#section-6
+        //
+        // o  ADDRESS, variable number of octets, contains either an IPv4 or
+        //    IPv6 address, depending on FAMILY, which MUST be truncated to the
+        //    number of bits indicated by the SOURCE PREFIX-LENGTH field,
+        //    padding with 0 bits to pad to the end of the last octet needed.
+        let prefix_bytes = prefix_bytes(source_prefix_len as usize);
+        if prefix_bytes + HEADER_LEN > len {
+            return Err(OptionParseError::ShortBuf);
+        }
+
         let addr = match family {
             1 => {
-                if len != 8 {
-                    return Err(OptionParseError::InvalidV4Length(len))
+                let mut buf = [0; 4];
+                if prefix_bytes > buf.len() {
+                    return Err(OptionParseError::InvalidV4Length(prefix_bytes));
                 }
-                let bytes: &[u8; 4] = unsafe {
-                    &*(parser.peek(4)?.as_ptr() as *const [u8; 4])
-                };
-                parser.advance(4)?;
-                IpAddr::from(*bytes)
+
+                parser.parse_buf(&mut buf[..prefix_bytes])?;
+                IpAddr::from(buf)
             }
             2 => {
-                if len != 20 {
-                    return Err(OptionParseError::InvalidV6Length(len))
+                let mut buf = [0; 16];
+                if prefix_bytes > buf.len() {
+                    return Err(OptionParseError::InvalidV6Length(prefix_bytes));
                 }
-                let bytes: &[u8; 16] = unsafe {
-                    &*(parser.peek(16)?.as_ptr() as *const [u8; 16])
-                };
-                parser.advance(16)?;
-                IpAddr::from(*bytes)
+
+                parser.parse_buf(&mut buf[..prefix_bytes])?;
+                IpAddr::from(buf)
             }
             _ => return Err(OptionParseError::InvalidFamily(family))
         };
@@ -77,28 +89,31 @@ impl ParseAll for ClientSubnet {
 
 impl Compose for ClientSubnet {
     fn compose_len(&self) -> usize {
-        match self.addr {
-            IpAddr::V4(_) => 8,
-            IpAddr::V6(_) => 20,
-        }
+        let prefix_bytes = prefix_bytes(self.source_prefix_len as usize);
+        HEADER_LEN + prefix_bytes
     }
 
     fn compose<B: BufMut>(&self, buf: &mut B) {
+        let prefix_bytes = prefix_bytes(self.source_prefix_len as usize);
         match self.addr {
             IpAddr::V4(addr) => {
                 1u16.compose(buf);
                 self.source_prefix_len.compose(buf);
                 self.scope_prefix_len.compose(buf);
-                buf.put_slice(&addr.octets());
+                buf.put_slice(&addr.octets()[..prefix_bytes]);
             }
             IpAddr::V6(addr) => {
                 2u16.compose(buf);
                 self.source_prefix_len.compose(buf);
                 self.scope_prefix_len.compose(buf);
-                buf.put_slice(&addr.octets());
+                buf.put_slice(&addr.octets()[..prefix_bytes]);
             }
         }
     }
+}
+
+fn prefix_bytes(bits: usize) -> usize {
+    (bits + 7) / 8
 }
 
 
