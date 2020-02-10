@@ -437,11 +437,7 @@ impl Compressor {
     /// Appends a compression label pointing to position `pos`.
     fn compose_compress_target(&mut self, pos: u16)
                                -> Result<(), ShortBuf> {
-        if self.buf.remaining_mut() < 2 {
-            return Err(ShortBuf)
-        }
-        (pos | 0xC000).compose(&mut self.buf);
-        Ok(())
+        self.compose(&(pos | 0xC000))
     }
 
     /// Appends something composable to the end of the buffer.
