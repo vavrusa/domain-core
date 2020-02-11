@@ -197,14 +197,14 @@ impl RrsigExt for Rrsig {
 
         match self.algorithm() {
             SecAlg::RsaSha1 | SecAlg::RsaSha1Nsec3Sha1 | SecAlg::RsaSha256 | SecAlg::RsaSha512 => {
-                let algorithm = match self.algorithm() {
-                    SecAlg::RsaSha1 | SecAlg::RsaSha1Nsec3Sha1 => &signature::RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY,
-                    SecAlg::RsaSha256 => &signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY,
-                    SecAlg::RsaSha512 => &signature::RSA_PKCS1_1024_8192_SHA512_FOR_LEGACY_USE_ONLY,
+                let (algorithm, min_bits) = match self.algorithm() {
+                    SecAlg::RsaSha1 | SecAlg::RsaSha1Nsec3Sha1 => (&signature::RSA_PKCS1_1024_8192_SHA1_FOR_LEGACY_USE_ONLY, 1024),
+                    SecAlg::RsaSha256 => (&signature::RSA_PKCS1_1024_8192_SHA256_FOR_LEGACY_USE_ONLY, 1024),
+                    SecAlg::RsaSha512 => (&signature::RSA_PKCS1_2048_8192_SHA512, 2048),
                     _ => unreachable!(),
                 };
                 // Check for minimum supported key size
-                if 8 * self.signature().len() < 1024 {
+                if 8 * self.signature().len() < min_bits {
                     return Err(AlgorithmError::Unsupported);
                 }
                 // The key isn't available in either PEM or DER, so use the direct RSA verifier.
