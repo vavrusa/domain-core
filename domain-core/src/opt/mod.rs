@@ -355,7 +355,7 @@ impl<D: OptData> OptIter<D> {
     }
 }
 
-impl<D: OptData> Iterator for OptIter<D> {
+impl<D: OptData> Iterator for OptIter<D> where D::ParseErr: From<ShortBuf> {
     type Item = Result<D, D::ParseErr>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -373,10 +373,10 @@ impl<D: OptData> Iterator for OptIter<D> {
     }
 }
 
-impl<D: OptData> OptIter<D> {
+impl<D: OptData> OptIter<D> where D::ParseErr: From<ShortBuf> {
     fn next_step(&mut self) -> Result<Option<D>, D::ParseErr> {
-        let code = self.parser.parse_u16().unwrap().into();
-        let len = self.parser.parse_u16().unwrap() as usize;
+        let code = self.parser.parse_u16()?.into();
+        let len = self.parser.parse_u16()? as usize;
         D::parse_option(code, &mut self.parser, len)
     }
 }
