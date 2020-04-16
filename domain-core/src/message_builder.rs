@@ -950,7 +950,7 @@ pub trait RecordSectionBuilder : SectionBuilder {
 #[cfg(test)]
 mod test {
     use std::str::FromStr;
-    use crate::rdata::*;
+    use crate::rdata::{Cname};
     use crate::name::*;
     use crate::message::*;
     use super::*;

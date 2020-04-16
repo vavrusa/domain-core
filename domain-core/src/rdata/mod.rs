@@ -20,12 +20,14 @@
 //!
 //! [`iana::Rtype`]: ../iana/enum.Rtype.html
 
+#[macro_use]
 pub mod rfc1035;
 pub mod rfc2782;
 pub mod rfc2845;
 pub mod rfc3596;
 pub mod rfc4034;
 pub mod rfc5155;
+pub mod rfc6672;
 pub mod rfc7344;
 
 #[macro_use]
@@ -95,6 +97,11 @@ rdata_types! {
         master {
             Nsec3,
             Nsec3param,
+        }
+    }
+    rfc6672::{
+        master {
+            Dname<N>,
         }
     }
     rfc7344::{

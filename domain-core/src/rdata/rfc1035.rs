@@ -28,6 +28,7 @@ use super::RtypeRecordData;
 ///
 /// Implements some basic methods plus the `RecordData`, `FlatRecordData`,
 /// and `Display` traits.
+#[macro_export]
 macro_rules! dname_type {
     ($(#[$attr:meta])* ( $target:ident, $rtype:ident, $field:ident ) ) => {
         $(#[$attr])*
