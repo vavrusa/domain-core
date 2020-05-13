@@ -1462,7 +1462,17 @@ impl<'a, Target: OctetsBuilder> OptBuilder<'a, Target> {
         let pos = self.as_target().as_ref().len();
         self.as_target_mut().append_all(|target| {
             code.compose(target)?;
-            op(target)
+            let pos = target.len();
+            0u16.compose(target)?;
+            let start = target.len();
+            op(target)?;
+            // Update option length
+            let opt_len = target.len() - start;
+            if opt_len > u16::max_value() as usize {
+                return Err(ShortBuf);
+            }
+            target.as_mut()[pos..pos+2].copy_from_slice(&(opt_len as u16).to_be_bytes());
+            Ok(())
         })?;
 
         // Update the length. If the option is too long, truncate and return
